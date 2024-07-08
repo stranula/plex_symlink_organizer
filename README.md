@@ -1,6 +1,6 @@
 This set of scripts was inspired by https://github.com/mercuryy-1337/debridshowrenamer is intended to work with zurg https://github.com/debridmediamanager/zurg-testing and/or pd_zurg https://github.com/I-am-PUID-0/pd_zurg/
 
-When Zurg is mounted, I have all of the playable files load into a /torrents/ folder and then use this script to sort them into:
+When Zurg is mounted, I have all of the playable files load into a /torrents/ folder and then use this script to create symlinks and sort them into:
    - Movies
        - Uncleaned
        - Cleaned
