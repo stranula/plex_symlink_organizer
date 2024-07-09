@@ -6,8 +6,8 @@ import time
 from datetime import datetime, timedelta
 from colorama import init, Fore, Style
 from config import get_settings, prompt_for_settings
-from db import initialize_db, log_processed_folder, get_processed_folders, log_multiple_match, get_multiple_matches, get_unresolved_multiple_matches, update_multiple_match_solution, delete_multiple_match, log_media_item
-from tmdb import search_tv_show, search_tv_show_by_id, search_movie, tmdb_search
+from db import initialize_db, log_processed_folder, get_processed_folders, log_multiple_match, get_multiple_matches, get_unresolved_multiple_matches, update_multiple_match_solution, delete_multiple_match, log_media_item, build_inverted_index, search_inverted_index
+from tmdb import search_tv_show, search_tv_show_by_id, search_movie, tmdb_search, update_series_names_from_overseer
 from utils import extract_year, extract_resolution, extract_folder_year, sanitize_title
 from collections import defaultdict
 
@@ -30,6 +30,10 @@ def clean_filename(filename):
     filename = re.sub(r' -$', '', filename)  # Remove trailing dash
     return filename
 
+# symlinkcreator.py
+
+# symlinkcreator.py
+
 def create_symlinks(src_dir, dest_dir, dest_dir_movies, force=False, id='tmdb', quick_scan=False):
     cleaned_dir = os.path.join(dest_dir, "Cleaned")
     uncleaned_dir = os.path.join(dest_dir, "Uncleaned")
@@ -50,6 +54,8 @@ def create_symlinks(src_dir, dest_dir, dest_dir_movies, force=False, id='tmdb', 
         dirs_to_check = []
         for root, dirs, files in os.walk(src_dir):
             dirs_to_check.append(root)
+
+    inverted_index = build_inverted_index()
 
     for root in dirs_to_check:
         folder_name = os.path.basename(root)
@@ -96,6 +102,7 @@ def create_symlinks(src_dir, dest_dir, dest_dir_movies, force=False, id='tmdb', 
             continue
 
         show_folder = None
+        log_failure = False  # Initialize a flag to log failure only if all attempts fail
 
         for file in os.listdir(root):
             src_file = os.path.join(root, file)
@@ -126,10 +133,50 @@ def create_symlinks(src_dir, dest_dir, dest_dir_movies, force=False, id='tmdb', 
                     if year:
                         show_folder = re.sub(r'\(\d{4}\)$', '', show_folder).strip()
                         show_folder = re.sub(r'\d{4}$', '', show_folder).strip()
-                    show_folder = search_tv_show(show_folder, year, id=id, force=force, folder_path=root)
+
+                    if not show_folder and year:
+                        # Use the year as the search term if the show name is empty
+                        show_folder = str(year)
+                        year = None
+
+                    # Normalize show_folder for inverted index search
+                    normalized_show_folder = re.sub(r'[^a-z0-9\s.]', '', show_folder.lower())
+
+                    # Log the search criteria
+                    print(f"Searching inverted index for: {normalized_show_folder} with year: {year}")
+
+                    # First attempt to find the show using the inverted index with the year
+                    search_results = search_inverted_index(normalized_show_folder, inverted_index, year)
+                    if not search_results:
+                        # Fallback to TMDb search if the inverted index search fails
+                        print(f"Searching TMDb for: {show_folder} with year: {year}")
+                        show_folder = search_tv_show(show_folder, year, id=id, force=force, folder_path=root)
+
+                        if not show_folder:
+                            # Fallback to replacing spaces with periods and searching again
+                            fallback_show_folder = normalized_show_folder.replace(' ', '.')
+                            print(f"Fallback search inverted index for: {fallback_show_folder} with year: {year}")
+                            search_results = search_inverted_index(fallback_show_folder, inverted_index, year)
+                            if not search_results:
+                                print(f"Fallback search TMDb for: {fallback_show_folder} with year: {year}")
+                                show_folder = search_tv_show(fallback_show_folder, year, id=id, force=force, folder_path=root)
+
+                                # If all year-based searches fail, search without the year
+                                if not search_results and not show_folder and year:
+                                    # Fallback search without year
+                                    print(f"Fallback search inverted index for: {normalized_show_folder} without year")
+                                    search_results = search_inverted_index(normalized_show_folder, inverted_index)
+                                    if not search_results:
+                                        print(f"Fallback search TMDb for: {show_folder} without year")
+                                        show_folder = search_tv_show(show_folder, None, id=id, force=force, folder_path=root)
+
+                    if search_results:
+                        best_match = search_results[0][0]
+                        show_folder = f"{best_match[0]} ({best_match[2]}) {{tmdb-{best_match[1]}}}"
+
                     if show_folder is None:
                         if show_name.lower() != "unknown":
-                            log_multiple_match(folder_name, ["No results found"], root)
+                            log_failure = True  # Set the flag to log the failure later
                         print(f"Unprocessed item: {src_file}")
                         skip_folder = True
                         break
@@ -176,10 +223,50 @@ def create_symlinks(src_dir, dest_dir, dest_dir_movies, force=False, id='tmdb', 
                 if year:
                     show_folder = re.sub(r'\(\d{4}\)$', '', show_folder).strip()
                     show_folder = re.sub(r'\d{4}$', '', show_folder).strip()
-                show_folder = search_tv_show(show_folder, year, id=id, force=force, folder_path=root)
+
+                if not show_folder and year:
+                    # Use the year as the search term if the show name is empty
+                    show_folder = str(year)
+                    year = None
+
+                # Normalize show_folder for inverted index search
+                normalized_show_folder = re.sub(r'[^a-z0-9\s.]', '', show_folder.lower())
+
+                # Log the search criteria
+                print(f"Searching inverted index for: {normalized_show_folder} with year: {year}")
+
+                # First attempt to find the show using the inverted index with the year
+                search_results = search_inverted_index(normalized_show_folder, inverted_index, year)
+                if not search_results:
+                    # Fallback to TMDb search if the inverted index search fails
+                    print(f"Searching TMDb for: {show_folder} with year: {year}")
+                    show_folder = search_tv_show(show_folder, year, id=id, force=force, folder_path=root)
+
+                    if not show_folder:
+                        # Fallback to replacing spaces with periods and searching again
+                        fallback_show_folder = normalized_show_folder.replace(' ', '.')
+                        print(f"Fallback search inverted index for: {fallback_show_folder} with year: {year}")
+                        search_results = search_inverted_index(fallback_show_folder, inverted_index, year)
+                        if not search_results:
+                            print(f"Fallback search TMDb for: {fallback_show_folder} with year: {year}")
+                            show_folder = search_tv_show(fallback_show_folder, year, id=id, force=force, folder_path=root)
+
+                            # If all year-based searches fail, search without the year
+                            if not search_results and not show_folder and year:
+                                # Fallback search without year
+                                print(f"Fallback search inverted index for: {normalized_show_folder} without year")
+                                search_results = search_inverted_index(normalized_show_folder, inverted_index)
+                                if not search_results:
+                                    print(f"Fallback search TMDb for: {show_folder} without year")
+                                    show_folder = search_tv_show(show_folder, None, id=id, force=force, folder_path=root)
+
+                if search_results:
+                    best_match = search_results[0][0]
+                    show_folder = f"{best_match[0]} ({best_match[2]}) {{tmdb-{best_match[1]}}}"
+
                 if show_folder is None:
                     if show_name.lower() != "unknown":
-                        log_multiple_match(folder_name, ["No results found"], root)
+                        log_failure = True  # Set the flag to log the failure later
                     print(f"Unprocessed item: {src_file}")
                     skip_folder = True
                     break
@@ -191,7 +278,7 @@ def create_symlinks(src_dir, dest_dir, dest_dir_movies, force=False, id='tmdb', 
             cleaned_dest_path = os.path.join(cleaned_dir, show_folder, season_folder)
             os.makedirs(cleaned_dest_path, exist_ok=True)
 
-            dest_file_name = f"{show_name.strip()} - {episode_identifier.strip()}"
+            dest_file_name = f"{show_folder} - {episode_identifier.strip()}"
             if resolution:
                 dest_file_name += f" [{resolution}]"
             dest_file_name += ext
@@ -226,31 +313,52 @@ def create_symlinks(src_dir, dest_dir, dest_dir_movies, force=False, id='tmdb', 
         if not skip_folder:
             log_processed_folder(combined_folder_name, 'processed')
         else:
+            if log_failure:
+                log_multiple_match(folder_name, ["No results found"], root)
             print(f"Skipping folder: {combined_folder_name}")
+
+    # ... other code ...
+
+def search_inverted_index_with_year_range(query, inverted_index, year, range_delta):
+    results = []
+    if year:
+        for delta in range(-range_delta, range_delta + 1):
+            search_results = search_inverted_index(query, inverted_index, year + delta)
+            if search_results:
+                results.extend(search_results)
+    else:
+        results = search_inverted_index(query, inverted_index)
+    return results
+
+def search_tv_show_with_year_range(query, year, id, force, folder_path, range_delta):
+    if year is not None:
+        for delta in range(-range_delta, range_delta + 1):
+            result = search_tv_show(query, year + delta, id=id, force=force, folder_path=folder_path)
+            if result:
+                return result
+    else:
+        result = search_tv_show(query, year, id=id, force=force, folder_path=folder_path)
+        if result:
+            return result
+    return None
+
 
 def extract_show_name_from_path(path):
     folder_name = os.path.basename(path)
     parent_folder = os.path.basename(os.path.dirname(path))
-    #print(f"Extracting show name from path. Folder name: {folder_name}, Parent folder: {parent_folder}")
 
-    # If the parent folder is 'torrents', use the folder name itself
     if parent_folder.lower() == "torrents":
         folder_name = folder_name if folder_name.lower() != "unknown" else None
     else:
         folder_name = parent_folder if parent_folder.lower() != "unknown" else folder_name
 
-    # Remove common patterns from folder name
-    folder_name = re.sub(r'\(.*?\)', '', folder_name)  # Remove everything inside parentheses
-    folder_name = re.sub(r'Season \d+-\d+', '', folder_name)  # Remove Season range info
-    folder_name = re.sub(r'S\d+', '', folder_name)  # Remove season identifier
-    folder_name = re.sub(r'E\d+', '', folder_name)  # Remove episode identifier
-    folder_name = re.sub(r'(\d{3,4}p|x\d{3,4}|HEVC|\d+bit|5\.1)', '', folder_name)  # Remove codec and resolution info
-    folder_name = re.sub(r'[._-]', ' ', folder_name).strip()  # Remove extra spaces and replace dots/dashes/underscores with space
-
-    # Remove leading and trailing whitespace
+    folder_name = re.sub(r'\(.*?\)', '', folder_name)
+    folder_name = re.sub(r'Season \d+-\d+', '', folder_name)
+    folder_name = re.sub(r'S\d+', '', folder_name)
+    folder_name = re.sub(r'E\d+', '', folder_name)
+    folder_name = re.sub(r'(\d{3,4}p|x\d{3,4}|HEVC|\d+bit|5\.1)', '', folder_name)
+    folder_name = re.sub(r'[._-]', ' ', folder_name).strip()
     folder_name = folder_name.strip()
-
-    #print(f"Cleaned folder name: {folder_name}")
     return folder_name
 
 def extract_tmdb_id_from_show_folder(show_folder):
@@ -272,14 +380,12 @@ def process_symlink(folder_path, solution):
 
             episode_match = re.search(r'(.*?)(S\d{2} ?E\d{2})', file, re.IGNORECASE)
             if not episode_match:
-                # Directly symlink in the Uncleaned directory maintaining the folder structure
                 relative_path = os.path.relpath(os.path.join(root, file), folder_path)
                 uncleaned_dest_file = os.path.join(uncleaned_dir, relative_path)
                 os.makedirs(os.path.dirname(uncleaned_dest_file), exist_ok=True)
                 if not os.path.exists(uncleaned_dest_file):
                     os.symlink(src_file, uncleaned_dest_file)
-                    # print(f"Created symlink: {uncleaned_dest_file} -> {src_file}")
-                log_media_item(src_file, uncleaned_dest_file, tmdb_id=None)  # Pass tmdb_id as None for uncleaned extras
+                log_media_item(src_file, uncleaned_dest_file, tmdb_id=None)
                 continue
 
             episode_identifier = episode_match.group(2)
@@ -298,7 +404,6 @@ def process_symlink(folder_path, solution):
             else:
                 new_name = name
 
-            print(f"Calling extract_resolution with new_name={new_name}, parent_folder_name={parent_folder_name}, file_path={src_file}")
             resolution = extract_resolution(new_name, parent_folder_name, src_file)
 
             if resolution:
@@ -337,25 +442,21 @@ def process_symlink(folder_path, solution):
                     os.remove(cleaned_dest_file)
             
             if os.path.exists(cleaned_dest_file) and not os.path.islink(cleaned_dest_file):
-                # print(f"Skipping existing file: {cleaned_dest_file}")
                 continue
 
             if os.path.isdir(src_file):
                 shutil.copytree(src_file, cleaned_dest_file, symlinks=True)
             else:
                 os.symlink(src_file, cleaned_dest_file)
-            #print(f"Created symlink: {cleaned_dest_file} -> {src_file}")
 
-            # Directly symlink in the Uncleaned directory maintaining the folder structure
             relative_path = os.path.relpath(os.path.join(root, file), folder_path)
             uncleaned_dest_file = os.path.join(uncleaned_dir, relative_path)
             os.makedirs(os.path.dirname(uncleaned_dest_file), exist_ok=True)
             if not os.path.exists(uncleaned_dest_file):
                 os.symlink(src_file, uncleaned_dest_file)
-                # print(f"Created symlink: {uncleaned_dest_file} -> {src_file}")
 
             tmdb_id = extract_tmdb_id_from_show_folder(show_folder)
-            log_media_item(src_file, cleaned_dest_file, tmdb_id)  # Include tmdb_id for cleaned series episodes
+            log_media_item(src_file, cleaned_dest_file, tmdb_id)
 
 def process_resolved_matches():
     unresolved_matches = get_unresolved_multiple_matches()
@@ -364,7 +465,7 @@ def process_resolved_matches():
     for folder_path, matches in grouped_matches.items():
         ids = [match[0] for match in matches]
         original_names = [match[1] for match in matches]
-        possible_matches = matches[0][2]  # Assuming possible matches are the same for items in the same folder
+        possible_matches = matches[0][2]
 
         while True:
             correct_name = extract_show_name_from_path(folder_path)
@@ -413,6 +514,7 @@ def process_resolved_matches():
                 print("Skipping this match")
                 break
 
+
 if __name__ == "__main__":
     settings = get_settings()
     initialize_db()
@@ -442,7 +544,7 @@ if __name__ == "__main__":
             print("Still checking for new files...")
             last_report_time = current_time
         
+        update_series_names_from_overseer()
         create_symlinks(src_dir, dest_dir, dest_dir_movies, force=args.force, id=id_choice, quick_scan=True)
         process_resolved_matches()
         time.sleep(10)  # Poll every 10 seconds
-

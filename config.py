@@ -30,6 +30,8 @@ def prompt_for_settings():
     settings['plex_token'] = input("Enter your Plex token: ")
     settings['plex_tv_section_id'] = input("Enter your Plex library section ID for TV shows: ")
     settings['plex_movie_section_id'] = input("Enter your Plex library section ID for movies: ")
+    settings['overseer_api_address'] = input("Enter your Overseer API address: ")
+    settings['overseer_api_key'] = input("Enter your Overseer API key: ")
 
     save_settings(settings)
     return settings
@@ -44,3 +46,7 @@ def prompt_for_api_key():
     settings['tmdb_api_key'] = api_key
     save_settings(settings)
     return api_key
+
+def get_overseer_settings():
+    settings = get_settings()
+    return settings.get('overseer_api_address'), settings.get('overseer_api_key')

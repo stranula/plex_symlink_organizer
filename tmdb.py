@@ -1,57 +1,43 @@
 import requests
 from functools import lru_cache
-from config import get_api_key, prompt_for_api_key
-from db import log_multiple_match
+from config import get_overseer_settings, get_api_key, prompt_for_api_key
+from db import store_tmdb_series_name, get_tmdb_series_name, log_multiple_match, build_inverted_index, search_inverted_index
 from fuzzywuzzy import fuzz
 import re
 
 def clean_search_query(query):
-    # Log the initial query
-    #print(f"Initial query: {query}")
-
-    # Extract year if present
     year_match = re.search(r'\((\d{4})\)|\b(\d{4})\b', query)
     year = year_match.group(1) or year_match.group(2) if year_match else None
-    #print(f"Extracted year: {year}")
+    query = re.sub(r'\([^)]*\)|\{[^}]*\}', '', query)
 
-    # Remove unnecessary parts, including everything after them
     patterns_to_remove = [
-        r'\(\d{4}\)',  # Year in parentheses
-        r'\b\d{4}\b',  # Year without parentheses
-        r'S\d{2}',     # Season identifier
-        r'E\d{2}',     # Episode identifier
-        r'\d{3,4}p',   # Resolution
-        r'BluRay',     # Media type
-        r'x\d{3,4}',   # Codec info
-        r'HEVC',       # Codec info
-        r'\d{1,2}bit', # Bit depth
-        r'AAC',        # Audio codec
-        r'Season \d+', # Season information
-        r'\d+x\d+',    # Episode format like 1x01
-        r'Complete',   # 'Complete' marker
-        r'Extras',     # 'Extras' marker
-        r'\[',         # Start of square brackets
-        r'\(',         # Start of parentheses
-        r'EDGE2020',   # Release group
-        r'EDG',        # Release group short form
+        r'\(\d{4}\)',  
+        r'\b\d{4}\b',  
+        r'S\d{2}',     
+        r'E\d{2}',     
+        r'\d{3,4}p',   
+        r'BluRay',     
+        r'x\d{3,4}',   
+        r'HEVC',       
+        r'\d{1,2}bit', 
+        r'AAC',        
+        r'Season \d+', 
+        r'\d+x\d+',    
+        r'Complete',   
+        r'Extras',     
+        r'\[',         
+        r'\(',         
     ]
-
-    # Find the earliest occurrence of any pattern
+    
     earliest_pos = len(query)
     for pattern in patterns_to_remove:
         match = re.search(pattern, query, re.IGNORECASE)
         if match and match.start() < earliest_pos:
             earliest_pos = match.start()
-
-    # Cut off the query at the earliest pattern occurrence
+    
     query = query[:earliest_pos].strip()
-    #print(f"Query after pattern removal: {query}")
-
-    # Clean up remaining punctuation and whitespace
     query = re.sub(r'[._-]', ' ', query)
     query = re.sub(r'\s+', ' ', query).strip()
-    #print(f"Final cleaned query: {query}")
-
     return query, year
 
 @lru_cache(maxsize=None)
@@ -81,15 +67,12 @@ def search_tv_show(query, year=None, id='tmdb', force=False, folder_path=None):
             print(f"Error fetching TMDb data: {e}")
             return []
 
-    #print(f"Performing search with query: {query} and year: {year}")
     results = perform_search(year)
 
     if not results and year:
-        print(f"Retrying search with query: {query} and year: {year + 1}")
         results = perform_search(year + 1)
 
     if not results and year:
-        print(f"Retrying search with query: {query} and year: {year - 1}")
         results = perform_search(year - 1)
 
     if results:
@@ -107,9 +90,6 @@ def search_tv_show(query, year=None, id='tmdb', force=False, folder_path=None):
         if best_match[1] > 90:
             chosen_show = best_match[0]
         else:
-            for result in results:
-                match_list = [f"{result['name']} ({result['first_air_date'][:4]}) [tmdb-{result['id']}]"]
-                log_multiple_match(query, match_list, folder_path)
             return None
 
         show_name = chosen_show.get('name')
@@ -119,8 +99,6 @@ def search_tv_show(query, year=None, id='tmdb', force=False, folder_path=None):
         proper_name = f"{show_name} ({show_year}) {{tmdb-{tmdb_id}}}"
         return proper_name
     else:
-        print(f"No results found for query: {query} year={year}")
-        log_multiple_match(query, ["No results found"], folder_path)
         return None
 
 def search_tv_show_by_id(tmdb_id):
@@ -189,3 +167,93 @@ def tmdb_search(query):
     except requests.exceptions.RequestException as e:
         print(f"Error fetching TMDb search results: {e}")
         return []
+
+def get_overseer_requests():
+    overseer_api_address, overseer_api_key = get_overseer_settings()
+    if not overseer_api_address or not overseer_api_key:
+        print("Overseer API address or key is not set.")
+        return []
+
+    url = f"{overseer_api_address}/api/v1/request"
+    headers = {
+        "X-Api-Key": overseer_api_key,
+        "accept": "application/json"
+    }
+
+    all_requests = []
+    skip = 0
+    take = 2000
+    while True:
+        params = {
+            "take": take,
+            "skip": skip,
+            "sort": "added"
+        }
+        try:
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("results", [])
+            if not results:
+                break
+            all_requests.extend(results)
+            skip += take
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching Overseer data: {e}")
+            break
+
+    return all_requests
+
+def fetch_tmdb_series_name(tmdb_id):
+    api_key = get_api_key()
+    url = f"https://api.themoviedb.org/3/tv/{tmdb_id}?api_key={api_key}"
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
+        data = response.json()
+        series_name = data.get('name')
+        year = data.get('first_air_date', '').split('-')[0] if data.get('first_air_date') else None
+        return series_name, year
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching TMDb data for ID {tmdb_id}: {e}")
+        return None, None
+
+def update_series_names_from_overseer():
+    requests_data = get_overseer_requests()
+    tmdb_id_count = 0
+    missing_tmdb_id_count = 0
+    for request in requests_data:
+        media = request.get('media', {})
+        tmdb_id = media.get('tmdbId')
+        if tmdb_id:
+            if request.get('type') == 'tv':
+                tmdb_id_count += 1
+                series_name, year = get_tmdb_series_name(tmdb_id)
+                if not series_name:
+                    series_name, year = fetch_tmdb_series_name(tmdb_id)
+                    if series_name:
+                        store_tmdb_series_name(tmdb_id, series_name, year)
+        else:
+            missing_tmdb_id_count += 1
+            print(f"Missing TMDb ID for request: {request}")
+
+    print(f"Total TMDb IDs found: {tmdb_id_count}")
+    print(f"Total requests without TMDb ID: {missing_tmdb_id_count}")
+
+
+def search_series_using_inverted_index(query):
+    inverted_index = build_inverted_index()
+    results = search_inverted_index(query, inverted_index)
+    return results
+
+def search_tv_show_with_year_range(query, year, id, force, folder_path, range_delta):
+    if year is not None:
+        for delta in range(-range_delta, range_delta + 1):
+            result = search_tv_show(query, year + delta, id=id, force=force, folder_path=folder_path)
+            if result:
+                return result
+    else:
+        result = search_tv_show(query, year, id=id, force=force, folder_path=folder_path)
+        if result:
+            return result
+    return None
